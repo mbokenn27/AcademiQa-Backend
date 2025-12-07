@@ -1,111 +1,155 @@
 # core/email_service.py
-
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.conf import settings
+import threading
+
+
+def _send_async(email: EmailMultiAlternatives):
+    """
+    Fire-and-forget sender so API requests don't block on SMTP.
+    """
+    try:
+        email.send(fail_silently=True)
+    except Exception as e:
+        # Don't crash request threads due to SMTP errors
+        print(f"[email] send failed: {e}")
 
 
 def send_new_task_notification(task):
-    """Send email notification to ALL admins + extra Gmail addresses when a new task is created"""
-    from .models import UserProfile
-    
-    # 1. Get all active admin users from database
-    admin_profiles = UserProfile.objects.filter(role='admin', user__is_active=True)
-    admin_emails = [profile.user.email for profile in admin_profiles if profile.user.email]
+    """
+    Send email notification when a new task is created.
 
-    # 2. Your personal/extra Gmail addresses (edit anytime)
+    Per your request: send FROM ad.academiqa@gmail.com TO the explicit list below.
+    (You can add/remove recipients in EXTRA_ADMIN_EMAILS.)
+    """
+    if getattr(settings, "DISABLE_EMAILS", False):
+        print("[email] skipped: DISABLE_EMAILS=1")
+        return
+
+    # Explicit recipients (you can uncomment / add more as needed)
     EXTRA_ADMIN_EMAILS = [
-        #"mbokenn27@gmail.com",
         "mbokenn95@gmail.com",
-        #"odugucalvince@gmail.com",
-        #"Briansimiyu13@gmail.com",
+        # "odugucalvince@gmail.com",
+        # "Briansimiyu13@gmail.com",
     ]
 
-    # Combine and remove duplicates
-    recipient_emails = list(set(admin_emails + EXTRA_ADMIN_EMAILS))
+    # If you want to include *all* admin users as well, flip this to True.
+    INCLUDE_DB_ADMINS = False
 
-    if not recipient_emails:
-        return  # Nothing to send
+    recipients = set(EXTRA_ADMIN_EMAILS)
 
-    subject = f"NEW TASK • {task.title} • {task.task_id or f'TSK{task.id:04d}'}"
+    if INCLUDE_DB_ADMINS:
+        try:
+            from .models import UserProfile
+            admin_profiles = UserProfile.objects.filter(role='admin', user__is_active=True)
+            for p in admin_profiles:
+                if p.user.email:
+                    recipients.add(p.user.email)
+        except Exception as e:
+            print(f"[email] failed to collect admin emails: {e}")
+
+    recipients = [r for r in recipients if r]  # drop empties
+    if not recipients:
+        print("[email] no recipients; skipping")
+        return
+
+    task_code = task.task_id or f"TSK{task.id:04d}"
+    subject = f"NEW TASK • {task.title} • {task_code}"
 
     context = {
         'task_title': task.title,
-        'task_subject': task.subject or "Not specified",                    # ← FIXED
-        'education_level': task.education_level or "Not specified",
-        'deadline': task.deadline.strftime('%B %d, %Y at %I:%M %p') if task.deadline else "Not set",
-        'proposed_budget': f"${task.proposed_budget}",
+        'task_subject': getattr(task, 'subject', None) or "Not specified",
+        'education_level': getattr(task, 'education_level', None) or "Not specified",
+        'deadline': task.deadline.strftime('%B %d, %Y at %I:%M %p') if getattr(task, 'deadline', None) else "Not set",
+        'proposed_budget': f"${getattr(task, 'proposed_budget', '')}",
         'student_name': task.client.get_full_name() or task.client.username,
         'student_email': task.client.email,
-        'task_id': task.task_id or f"TSK{task.id:04d}",
-        'task_url': f"{settings.FRONTEND_URL}/admin/dashboard",             # ← THIS LINE IS HERE
+        'task_id': task_code,
+        'task_url': f"{settings.FRONTEND_URL}/admin/dashboard",
     }
-    
+
     html_message = render_to_string('emails/new_task_notification.html', context)
     plain_message = strip_tags(html_message)
 
     email = EmailMultiAlternatives(
         subject=subject,
         body=plain_message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=recipient_emails,
+        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER),
+        to=recipients,
     )
     email.attach_alternative(html_message, "text/html")
-    
-    try:
-        email.send()
-        print(f"New task email sent successfully to: {recipient_emails}")
-    except Exception as e:
-        print(f"Failed to send new task email: {e}")
 
-# === ADD THESE 3 FUNCTIONS TO core/email_service.py ===
+    # Send in background (non-blocking)
+    threading.Thread(target=_send_async, args=(email,), daemon=True).start()
+    print(f"[email] queued new task email to: {recipients}")
+
 
 def send_task_status_update(task, student, update_message):
-    """Send email to student when task status is updated"""
+    """
+    Email student when task status is updated.
+    """
+    if getattr(settings, "DISABLE_EMAILS", False):
+        print("[email] skipped: DISABLE_EMAILS=1")
+        return
+
     subject = f"Task Update: {task.title}"
-    
+
     context = {
         'student_name': student.get_full_name() or student.username,
         'task_title': task.title,
         'task_status': task.get_status_display(),
         'update_message': update_message,
-        'admin_name': task.assigned_admin.get_full_name() if task.assigned_admin else None,
+        'admin_name': task.assigned_admin.get_full_name() if getattr(task, 'assigned_admin', None) else None,
         'task_url': f"{settings.FRONTEND_URL}/client/dashboard/tasks/{task.id}"
     }
-    
+
     html_message = render_to_string('emails/task_status_update.html', context)
     plain_message = strip_tags(html_message)
-    
+
     email = EmailMultiAlternatives(
         subject=subject,
         body=plain_message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[student.email]
+        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER),
+        to=[student.email],
     )
     email.attach_alternative(html_message, "text/html")
-    email.send()
+    threading.Thread(target=_send_async, args=(email,), daemon=True).start()
+    print(f"[email] queued task status update to: {student.email}")
 
 
 def send_new_message_notification(task, message, recipient):
-    """Send email notification for new chat messages"""
+    """
+    Email notification for new chat messages.
+    """
+    if getattr(settings, "DISABLE_EMAILS", False):
+        print("[email] skipped: DISABLE_EMAILS=1")
+        return
+
     subject = f"New Message - Task: {task.title}"
-    
+
+    preview = (message.message[:100] + '...') if len(message.message or "") > 100 else (message.message or "")
+    sender_name = (
+        getattr(message, "sender", None) and (getattr(message.sender, "get_full_name", lambda: "")() or getattr(message.sender, "username", None))
+    ) or "User"
+
     context = {
         'task_title': task.title,
-        'sender_name': message.sender.get_full_name() or message.sender.username,
-        'message_preview': message.message[:100] + '...' if len(message.message) > 100 else message.message,
-        'task_url': f"{settings.FRONTEND_URL}/client/dashboard/tasks/{task.id}"
+        'sender_name': sender_name,
+        'message_preview': preview,
+        'task_url': f"{settings.FRONTEND_URL}/client/dashboard/tasks/{task.id}",
     }
-    
+
     html_message = render_to_string('emails/new_message_notification.html', context)
     plain_message = strip_tags(html_message)
-    
+
     email = EmailMultiAlternatives(
         subject=subject,
         body=plain_message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[recipient.email]
+        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER),
+        to=[recipient.email],
     )
     email.attach_alternative(html_message, "text/html")
-    email.send()
+    threading.Thread(target=_send_async, args=(email,), daemon=True).start()
+    print(f"[email] queued new message notification to: {recipient.email}")

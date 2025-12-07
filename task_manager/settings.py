@@ -132,7 +132,7 @@ SIMPLE_JWT = {
 }
 
 # -------------------------------------------------------------------
-# CORS (kept permissive as in your original; tighten for prod later)
+# CORS (kept permissive; tighten for prod later)
 # -------------------------------------------------------------------
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
@@ -170,16 +170,28 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = Path(os.getenv('MEDIA_ROOT', BASE_DIR / 'media'))
 
 # -------------------------------------------------------------------
-# Email
+# Frontend URL (used in emails/links)
 # -------------------------------------------------------------------
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
-FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# -------------------------------------------------------------------
+# Email (kill switch + timeout; non-blocking in code)
+# -------------------------------------------------------------------
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "5"))
+DISABLE_EMAILS = os.getenv("DISABLE_EMAILS", "0") == "1"
+
+if DISABLE_EMAILS:
+    # Completely bypass SMTP; prevents request hangs if network is blocked
+    EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
+    DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'no-reply@example.com')
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+    EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+    EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+    EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
+    EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
+    DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 # -------------------------------------------------------------------
 # i18n / tz
